@@ -4,7 +4,7 @@ import json
 # Set up Roboflow inference client
 CLIENT = InferenceHTTPClient(
     api_url="https://serverless.roboflow.com",
-    api_key="3RkpOI0l5m1G3BRxutYy"
+    api_key="your-key-here or set at .env"
 )
 
 # Run inference on your image
