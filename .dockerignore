@@ -1,0 +1,12 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+.git
+.gitignore
+*.log
+temp_uploaded.png
+debug_crop_*.png
+.vscode
+node_modules

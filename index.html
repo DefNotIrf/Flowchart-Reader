@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Flowchart Reader POC</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: #f4f6fa;
+      margin: 0;
+      padding: 0;
+    }
+    h2 {
+      text-align: center;
+      margin-top: 24px;
+      color: #2c3e50;
+    }
+    #instructions {
+      text-align: center;
+      margin-bottom: 10px;
+      color: #555;
+      font-size: 15px;
+    }
+    #toolbar {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 18px;
+      flex-wrap: wrap;
+    }
+    .btn {
+      padding: 8px 16px;
+      background: #3498db;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-size: 15px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .btn:hover {
+      background: #217dbb;
+    }
+    #canvasContainer {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 18px;
+    }
+    #canvas {
+      box-shadow: 0 2px 12px rgba(44,62,80,0.08);
+      background: #fff;
+      border-radius: 8px;
+    }
+    #statusBar {
+      text-align: center;
+      margin-bottom: 10px;
+      font-size: 15px;
+      color: #16a085;
+      min-height: 22px;
+    }
+    #results {
+      white-space: pre-wrap;
+      background: #fff;
+      padding: 1em;
+      border-radius: 8px;
+      box-shadow: 0 2px 12px rgba(44,62,80,0.08);
+      margin: 0 auto 24px auto;
+      max-width: 900px;
+      font-size: 14px;
+      color: #222;
+    }
+    #copyBtn, #downloadBtn {
+      margin-right: 8px;
+      padding: 6px 12px;
+      background: #16a085;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    #copyBtn:hover, #downloadBtn:hover {
+      background: #138d75;
+    }
+  </style>
+</head>
+<body>
+  <h2>Flowchart Reader POC</h2>
+  <div id="instructions">
+    1. Upload your flowchart image.<br>
+    2. Use toolbar to auto-detect, draw, resize, or remove boxes/arrows.<br>
+    3. Click "Run OCR & Export JSON" to process and export results.
+  </div>
+  <div id="toolbar">
+    <input type="file" id="imgInput" accept="image/*" class="btn">
+    <button id="cvBtn" class="btn">Auto Detect Boxes (CV Model)</button>
+    <button id="zoomInBtn" class="btn">Zoom In</button>
+    <button id="zoomOutBtn" class="btn">Zoom Out</button>
+    <button id="drawBoxBtn" class="btn">Draw Box</button>
+    <button id="drawArrowBtn" class="btn">Draw Arrow</button>
+    <button id="resizeBoxBtn" class="btn">Resize Box</button>
+    <button id="removeShapeBtn" class="btn">Remove Shape</button>
+    <button id="removeArrowBtn" class="btn">Remove Arrow</button>
+    <button id="sendBtn" class="btn">Run OCR & Export JSON</button>
+  </div>
+  <div id="statusBar"></div>
+  <div id="canvasContainer">
+    <canvas id="canvas"></canvas>
+  </div>
+  <h3 style="text-align:center;">OCR Results:</h3>
+  <div style="text-align:center;">
+    <button id="copyBtn">Copy JSON</button>
+    <button id="downloadBtn">Download JSON</button>
+  </div>
+  <div id="results"></div>
+  <script>
+    let img = new Image();
+    let boxes = [], arrows = [];
+    let mode = 'drawBox'; // drawBox, drawArrow, removeShape, resizeBox
+    let drawing = false, startX, startY, arrowStartIdx = null, selectedBoxIdx = null, resizingCorner = null;
+    let scale = 1.0, baseWidth = 900;
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const imgInput = document.getElementById('imgInput');
+    const resultsDiv = document.getElementById('results');
+    const drawBoxBtn = document.getElementById('drawBoxBtn');
+    const drawArrowBtn = document.getElementById('drawArrowBtn');
+    const removeShapeBtn = document.getElementById('removeShapeBtn');
+    const zoomInBtn = document.getElementById('zoomInBtn');
+    const zoomOutBtn = document.getElementById('zoomOutBtn');
+    const resizeBoxBtn = document.getElementById('resizeBoxBtn');
+    const cvBtn = document.getElementById('cvBtn');
+
+    function setStatus(msg) {
+      document.getElementById('statusBar').textContent = msg;
+    }
+
+    drawBoxBtn.onclick = () => { mode = 'drawBox'; arrowStartIdx = null; setStatus("Draw Box: Click and drag to create a box."); };
+    drawArrowBtn.onclick = () => { mode = 'drawArrow'; arrowStartIdx = null; setStatus("Draw Arrow: Click start box, then end box."); };
+    removeShapeBtn.onclick = () => { mode = 'removeShape'; setStatus("Remove Shape: Click a box to remove it."); };
+    zoomInBtn.onclick = () => { scale *= 1.2; redraw(); setStatus("Zoomed In."); };
+    zoomOutBtn.onclick = () => { scale = Math.max(1.0, scale / 1.2); redraw(); setStatus("Zoomed Out."); };
+    resizeBoxBtn.onclick = () => { mode = 'resizeBox'; setStatus("Resize Box: Drag a corner to resize."); };
+    cvBtn.onclick = async () => {
+      if (!imgInput.files[0]) {
+        alert('Upload an image first.');
+        return;
+      }
+      const formData = new FormData();
+      formData.append('image', imgInput.files[0]);
+      setStatus("Auto Detecting Boxes...");
+      try {
+        const resp = await fetch('http://127.0.0.1:8000/cvmodel', {
+          method: 'POST',
+          body: formData
+        });
+        const data = await resp.json();
+        boxes = data.boxes.map(b => ({
+          x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2, label: "box"
+        }));
+        redraw();
+        setStatus("Boxes detected!");
+      } catch (err) {
+        resultsDiv.textContent = 'Error: ' + err;
+      }
+    };
+
+    imgInput.onchange = e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = evt => { img.src = evt.target.result; };
+      reader.readAsDataURL(file);
+      setStatus("Image uploaded.");
+    };
+
+    img.onload = () => {
+      scale = img.width > baseWidth ? baseWidth / img.width : 1.0;
+      canvas.width = img.width * scale;
+      canvas.height = img.height * scale;
+      boxes = []; arrows = [];
+      redraw();
+    };
+
+    canvas.onmousedown = e => {
+      if (!img.src) return;
+      const x = e.offsetX / scale, y = e.offsetY / scale;
+      if (mode === 'drawArrow') {
+        let idx = getBoxAt(x, y);
+        if (idx !== null) {
+          if (arrowStartIdx === null) {
+            arrowStartIdx = idx;
+            redraw();
+          } else if (arrowStartIdx !== idx) {
+            arrows.push({from: arrowStartIdx, to: idx});
+            arrowStartIdx = null;
+            redraw();
+          }
+        }
+      } else if (mode === 'removeShape') {
+        let idx = getBoxAt(x, y);
+        if (idx !== null) {
+          boxes.splice(idx, 1);
+          arrows = arrows.filter(a => a.from !== idx && a.to !== idx);
+          redraw();
+        }
+      } else if (mode === 'resizeBox') {
+        let {idx, corner} = getBoxCornerAt(x, y);
+        if (idx !== null && corner !== null) {
+          selectedBoxIdx = idx;
+          resizingCorner = corner;
+          drawing = true;
+        }
+      } else if (mode === 'drawBox') {
+        drawing = true;
+        startX = x;
+        startY = y;
+      }
+    };
+
+    canvas.onmousemove = e => {
+      if (mode === 'resizeBox' && drawing && selectedBoxIdx !== null && resizingCorner !== null) {
+        const x = e.offsetX / scale, y = e.offsetY / scale;
+        let b = boxes[selectedBoxIdx];
+        if (resizingCorner === 'tl') { b.x1 = x; b.y1 = y; }
+        if (resizingCorner === 'tr') { b.x2 = x; b.y1 = y; }
+        if (resizingCorner === 'bl') { b.x1 = x; b.y2 = y; }
+        if (resizingCorner === 'br') { b.x2 = x; b.y2 = y; }
+        redraw();
+      }
+    };
+
+    canvas.onmouseup = e => {
+      const x = e.offsetX / scale, y = e.offsetY / scale;
+      if (mode === 'drawBox' && drawing) {
+        drawing = false;
+        const endX = x, endY = y;
+        const x1 = Math.min(startX, endX), y1 = Math.min(startY, endY);
+        const x2 = Math.max(startX, endX), y2 = Math.max(startY, endY);
+        boxes.push({x1, y1, x2, y2, label: "box"});
+        redraw();
+      } else if (mode === 'resizeBox' && drawing) {
+        drawing = false;
+        selectedBoxIdx = null;
+        resizingCorner = null;
+      }
+    };
+
+    function getBoxAt(x, y) {
+      for (let i = 0; i < boxes.length; i++) {
+        let b = boxes[i];
+        if (x >= b.x1 && x <= b.x2 && y >= b.y1 && y <= b.y2) return i;
+      }
+      return null;
+    }
+
+    function getBoxCornerAt(x, y) {
+      for (let i = 0; i < boxes.length; i++) {
+        let b = boxes[i];
+        const corners = [
+          {corner: 'tl', x: b.x1, y: b.y1},
+          {corner: 'tr', x: b.x2, y: b.y1},
+          {corner: 'bl', x: b.x1, y: b.y2},
+          {corner: 'br', x: b.x2, y: b.y2}
+        ];
+        for (let c of corners) {
+          if (Math.abs(x - c.x) < 10 && Math.abs(y - c.y) < 10) {
+            return {idx: i, corner: c.corner};
+          }
+        }
+      }
+      return {idx: null, corner: null};
+    }
+
+    function redraw() {
+      canvas.width = img.width * scale;
+      canvas.height = img.height * scale;
+      if (img.src) ctx.drawImage(img, 0, 0, img.width * scale, img.height * scale);
+      // Draw arrows
+      arrows.forEach(a => {
+        let b1 = boxes[a.from], b2 = boxes[a.to];
+        if (b1 && b2) {
+          ctx.beginPath();
+          ctx.moveTo((b1.x1+b1.x2)/2*scale, (b1.y1+b1.y2)/2*scale);
+          ctx.lineTo((b2.x1+b2.x2)/2*scale, (b2.y1+b2.y2)/2*scale);
+          ctx.strokeStyle = (arrowStartIdx !== null && (a.from === arrowStartIdx || a.to === arrowStartIdx)) ? 'orange' : 'blue';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          drawArrowhead(
+            (b1.x1+b1.x2)/2*scale, (b1.y1+b1.y2)/2*scale,
+            (b2.x1+b2.x2)/2*scale, (b2.y1+b2.y2)/2*scale
+          );
+        }
+      });
+      
+      // Draw boxes
+      boxes.forEach((b, i) => {
+        ctx.strokeStyle = (arrowStartIdx === i && mode === 'drawArrow') ? 'orange' : 'red';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(b.x1*scale, b.y1*scale, (b.x2-b.x1)*scale, (b.y2-b.y1)*scale);
+        // Draw corners for resizing
+        ['tl','tr','bl','br'].forEach(corner => {
+          let x = corner[0]==='t'?b.x1:b.x2, y = corner[1]==='l'?b.y1:b.y2;
+          ctx.fillStyle = 'orange';
+          ctx.fillRect(x*scale-5, y*scale-5, 10, 10);
+        });
+      });
+    }
+
+    function drawArrowhead(x1, y1, x2, y2) {
+      const headlen = 10;
+      const angle = Math.atan2(y2 - y1, x2 - x1);
+      ctx.beginPath();
+      ctx.moveTo(x2, y2);
+      ctx.lineTo(x2 - headlen * Math.cos(angle - Math.PI / 6), y2 - headlen * Math.sin(angle - Math.PI / 6));
+      ctx.lineTo(x2 - headlen * Math.cos(angle + Math.PI / 6), y2 - headlen * Math.sin(angle + Math.PI / 6));
+      ctx.lineTo(x2, y2);
+      ctx.fillStyle = 'blue';
+      ctx.fill();
+    }
+
+    document.getElementById('sendBtn').onclick = async () => {
+      if (!imgInput.files[0] || boxes.length === 0) {
+        alert('Upload an image and draw at least one box.');
+        return;
+      }
+      // Convert box coordinates back to original image size
+      const scaledBoxes = boxes.map(b => ({
+        x1: Math.round(b.x1 / scale),
+        y1: Math.round(b.y1 / scale),
+        x2: Math.round(b.x2 / scale),
+        y2: Math.round(b.y2 / scale),
+        label: "box"
+      }));
+      const formData = new FormData();
+      formData.append('image', imgInput.files[0]);
+      formData.append('boxes', JSON.stringify(scaledBoxes));
+      formData.append('arrows', JSON.stringify(arrows));
+      resultsDiv.textContent = 'Processing...';
+      try {
+        const resp = await fetch('http://127.0.0.1:8000/ocr', {
+          method: 'POST',
+          body: formData
+        });
+        const data = await resp.json();
+        resultsDiv.textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        resultsDiv.textContent = 'Error: ' + err;
+      }
+    };
+
+    document.getElementById('copyBtn').onclick = () => {
+      const text = document.getElementById('results').textContent;
+      navigator.clipboard.writeText(text);
+      setStatus("JSON copied to clipboard.");
+    };
+    document.getElementById('downloadBtn').onclick = () => {
+      const text = document.getElementById('results').textContent;
+      const blob = new Blob([text], {type: "application/json"});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = "flowchart_results.json";
+      a.click();
+      setStatus("JSON downloaded.");
+    };
+  </script>
+</body>
+</html>
